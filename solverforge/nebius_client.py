@@ -3,6 +3,7 @@ import os
 
 from dotenv import load_dotenv
 from openai import OpenAI
+from pydantic import ValidationError
 
 from solverforge.schemas import OptimizationAnalysis
 
@@ -47,61 +48,84 @@ class NebiusClient:
         schema = OptimizationAnalysis.model_json_schema()
 
         system_prompt = """
-    You are the optimization research component of SolverForge.
+You are the optimization research component of SolverForge.
 
-    Analyze performance-sensitive source code and generate optimization experiments.
+SolverForge experimentally improves algorithms and performance-sensitive
+software.
 
-    IMPORTANT:
-    Your entire response must be ONE JSON OBJECT.
+Your job is NOT to rewrite the entire program.
 
-    The root JSON object must contain exactly these keys:
+Instead:
 
-    {
-        "summary": "string",
-        "suspected_bottleneck": "string",
-        "hypotheses": [
-            {
-                "title": "string",
-                "hypothesis": "string",
-                "proposed_change": "string",
-                "target_files": ["string"],
-                "expected_effect": "string",
-                "risk": "string",
-                "validation_steps": ["string"],
-                "confidence": "low | medium | high"
-            }
-        ]
-    }
+1. Analyze the supplied source code.
+2. Identify likely computational bottlenecks.
+3. Produce exactly three distinct optimization hypotheses.
+4. Each hypothesis must describe one measurable experiment.
+5. Do not claim that an optimization works before it has been benchmarked.
+6. Preserve program correctness.
+7. Prefer algorithmic improvements over cosmetic code changes.
+8. Include tests or benchmarks that would validate each hypothesis.
 
-    Requirements:
+Every hypothesis MUST contain all 8 fields:
 
-    1. "hypotheses" must contain exactly 3 items.
-    2. Do NOT return a JSON array as the root.
-    3. Do NOT return Markdown.
-    4. Do NOT return code fences.
-    5. Do NOT rewrite the program.
-    6. Each hypothesis must describe one measurable optimization experiment.
-    7. Preserve correctness.
-    8. Do not claim an optimization succeeded before benchmarking.
-    9. Prefer algorithmic performance improvements over cosmetic changes.
-    """.strip()
+1. title
+2. hypothesis
+3. proposed_change
+4. target_files
+5. expected_effect
+6. risk
+7. validation_steps
+8. confidence
+
+Never omit confidence.
+
+confidence must always be exactly one of:
+
+"low"
+"medium"
+"high"
+
+Your entire response must be ONE JSON object.
+
+The root object must contain:
+
+- summary
+- suspected_bottleneck
+- hypotheses
+
+The hypotheses array must contain exactly three objects.
+
+Do not return Markdown.
+Do not return code fences.
+Do not return a JSON array as the root.
+
+You are generating hypotheses only.
+
+Another SolverForge component will implement and experimentally test them.
+""".strip()
 
         user_prompt = f"""
-    Analyze the following Python source file.
+Analyze this Python source file for potential performance optimizations.
 
-    Filename:
-    {filename}
+Filename:
+{filename}
 
-    SOURCE CODE START
-    {source_code}
-    SOURCE CODE END
+SOURCE CODE START
 
-    Return one OptimizationAnalysis JSON object containing:
+{source_code}
 
-    - summary
-    - suspected_bottleneck
-    - exactly three hypotheses
-    """.strip()
+SOURCE CODE END
+
+Produce exactly three distinct optimization hypotheses.
+
+Remember:
+
+- Return one JSON object.
+- Include summary.
+- Include suspected_bottleneck.
+- Include exactly three hypotheses.
+- Every hypothesis must include confidence.
+""".strip()
 
         response = self.client.chat.completions.create(
             model=self.model,
@@ -137,6 +161,149 @@ class NebiusClient:
                 "Nemotron returned an empty response."
             )
 
-        raw_data = json.loads(message.content)
+        try:
+            raw_data = json.loads(message.content)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Nemotron returned invalid JSON."
+            ) from exc
 
-        return OptimizationAnalysis.model_validate(raw_data)
+        try:
+            return OptimizationAnalysis.model_validate(
+                raw_data
+            )
+
+        except ValidationError as exc:
+            print()
+            print(
+                "Nemotron response failed schema validation."
+            )
+            print(
+                "Attempting automatic repair..."
+            )
+            print()
+
+            return self._repair_analysis(
+                raw_data=raw_data,
+                validation_error=str(exc),
+            )
+
+    def _repair_analysis(
+        self,
+        raw_data: object,
+        validation_error: str,
+    ) -> OptimizationAnalysis:
+        schema = OptimizationAnalysis.model_json_schema()
+
+        repair_system_prompt = """
+You repair structured JSON responses.
+
+Your job is to fix the supplied JSON so that it exactly satisfies the
+required OptimizationAnalysis schema.
+
+Do not change the meaning unnecessarily.
+
+Return only valid JSON.
+
+Do not return Markdown.
+Do not return code fences.
+Do not provide an explanation.
+""".strip()
+
+        repair_user_prompt = f"""
+The previous OptimizationAnalysis response failed validation.
+
+VALIDATION ERROR:
+
+{validation_error}
+
+PREVIOUS JSON:
+
+{json.dumps(raw_data, indent=2)}
+
+Repair the JSON so that it exactly satisfies the required schema.
+
+The root object must contain:
+
+- summary
+- suspected_bottleneck
+- hypotheses
+
+hypotheses must contain exactly three objects.
+
+Every hypothesis MUST contain all of these fields:
+
+- title
+- hypothesis
+- proposed_change
+- target_files
+- expected_effect
+- risk
+- validation_steps
+- confidence
+
+confidence MUST be exactly one of:
+
+- low
+- medium
+- high
+
+Return one corrected JSON object only.
+""".strip()
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": repair_system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": repair_user_prompt,
+                },
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "optimization_analysis",
+                    "schema": schema,
+                },
+            },
+            temperature=0.0,
+        )
+
+        message = response.choices[0].message
+
+        if getattr(message, "refusal", None):
+            raise RuntimeError(
+                f"Model refused repair request: "
+                f"{message.refusal}"
+            )
+
+        if not message.content:
+            raise RuntimeError(
+                "Nemotron returned an empty repair response."
+            )
+
+        try:
+            repaired_data = json.loads(
+                message.content
+            )
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Nemotron returned invalid JSON "
+                "during schema repair."
+            ) from exc
+
+        try:
+            return OptimizationAnalysis.model_validate(
+                repaired_data
+            )
+
+        except ValidationError as exc:
+            raise RuntimeError(
+                "Nemotron response still failed schema "
+                "validation after one repair attempt.\n\n"
+                f"{exc}"
+            ) from exc

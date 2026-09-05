@@ -1,0 +1,1 @@
+"""Candidate-generation utilities for SolverForge."""

@@ -4,15 +4,7 @@ import random
 def find_duplicates(
     numbers: list[int],
 ) -> list[int]:
-    duplicates = []
-
-    for i in range(len(numbers)):
-        for j in range(i + 1, len(numbers)):
-            if numbers[i] == numbers[j]:
-                if numbers[i] not in duplicates:
-                    duplicates.append(numbers[i])
-
-    return duplicates
+    return list(set(numbers))
 
 
 def main() -> None:
@@ -25,7 +17,6 @@ def main() -> None:
 
     duplicates = find_duplicates(numbers)
 
-    # Stable deterministic output for SolverForge verification.
     print(len(duplicates))
     print(sum(duplicates))
 
